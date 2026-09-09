@@ -1322,144 +1322,6 @@ for sl, bs in tup_bs_sl:
     save_data_and_model(f"lstm_cell_batchsize_{bs}_seqlen_{sl}", input_, lstm, export_params=True)
     save_data_and_model(f"gru_cell_batchsize_{bs}_seqlen_{sl}", input_, lstm, export_params=True)
 
-class LayoutLSTM:
-    def __init__(self, **params: Any) -> None:
-        # LSTM Input Names
-        X = "X"
-        W = "W"
-        R = "R"
-        B = "B"
-        H_0 = "initial_h"
-        C_0 = "initial_c"
-        P = "P"
-        LAYOUT = "layout"
-
-        number_of_gates     = 4
-        number_of_peepholes = 3
-        weight_scale        = 1
-
-
-        hidden_size = params["hidden_size"]
-        input_size  = params["input_size"]
-        layout = params[LAYOUT] if LAYOUT in params else 0
-
-        batch_size = params[X].shape[0] if layout else params[X].shape[1]
-
-        # Initializing Inputs
-        params[W] = weight_scale * np.ones(
-            (1, number_of_gates * hidden_size, input_size)
-        ).astype(np.float32)
-        params[R] = weight_scale * np.ones(
-            (1, number_of_gates * hidden_size, hidden_size)
-        ).astype(np.float32)
-
-        params[B] = np.ones((1, 2 * number_of_gates * hidden_size)).astype(np.float32)
-
-        if H_0 not in params and C_0 not in params:
-            params[H_0] = np.ones((1, batch_size, hidden_size)).astype(np.float32)
-            params[C_0] = np.ones((1, batch_size, hidden_size)).astype(np.float32)
-
-        params[P] = weight_scale * np.ones((1, number_of_peepholes * hidden_size)).astype(
-            np.float32)
-
-        self.num_directions = params[W].shape[0]
-
-        if self.num_directions == 1:
-
-            x = params[X]
-            x = x if layout == 0 else np.swapaxes(x, 0, 1)
-
-
-            b = (
-                params[B]
-                if B in params
-                else np.ones(1, 2 * number_of_gates * hidden_size, dtype=np.float32)
-            )
-            p = (
-                params[P]
-                if P in params
-                else np.ones(1, number_of_peepholes * hidden_size, dtype=np.float32)
-            )
-            h_0 = (
-                params[H_0]
-                if H_0 in params
-                else np.ones((1, batch_size, hidden_size), dtype=np.float32)
-            )
-            c_0 = (
-                params[C_0]
-                if C_0 in params
-                else np.ones((1, batch_size, hidden_size), dtype=np.float32)
-            )
-
-            self.X = x
-            self.W = params[W]
-            self.R = params[R]
-            self.B = params[B]
-            self.P = params[P]
-            self.H_0 = params[H_0]
-            self.C_0 = params[C_0]
-            self.LAYOUT = layout
-        else:
-            raise NotImplementedError()
-
-    def f(self, x: np.ndarray) -> np.ndarray:
-        return 1 / (1 + np.exp(-x))
-
-    def g(self, x: np.ndarray) -> np.ndarray:
-        return np.tanh(x)
-
-    def h(self, x: np.ndarray) -> np.ndarray:
-        return np.tanh(x)
-
-    def step(self) -> Tuple[np.ndarray, np.ndarray]:
-
-        self.W = np.squeeze(self.W, axis=0)
-        self.R = np.squeeze(self.R, axis=0)
-        self.B = np.squeeze(self.B, axis=0)
-        self.P = np.squeeze(self.P, axis=0)
-        self.H_0 = np.squeeze(self.H_0, axis=0)
-        self.C_0 = np.squeeze(self.C_0, axis=0)
-
-        seq_length = self.X.shape[0]
-        hidden_size = self.H_0.shape[-1]
-        batch_size = self.X.shape[1]
-
-        Y = np.empty([seq_length, self.num_directions, batch_size, hidden_size])
-        h_list = []
-
-        [p_i, p_o, p_f] = np.split(self.P, 3)
-        H_t = self.H_0
-        C_t = self.C_0
-        for x in np.split(self.X, self.X.shape[0], axis=0):
-            gates = (
-                np.dot(x, np.transpose(self.W))
-                + np.dot(H_t, np.transpose(self.R))
-                + np.add(*np.split(self.B, 2))
-            )
-            i, o, f, c = np.split(gates, 4, -1)
-            i = self.f(i + p_i * C_t)
-            f = self.f(f + p_f * C_t)
-            c = self.g(c)
-            C = f * C_t + i * c
-            o = self.f(o + p_o * C)
-            H = o * self.h(C)
-            h_list.append(H)
-            H_t = H
-            C_t = C
-
-        concatenated = np.concatenate(h_list)
-        if self.num_directions == 1:
-            Y[:, 0, :, :] = concatenated
-
-        if self.LAYOUT == 0:
-            Y_h = Y[-1]
-        else:
-            Y_h = Y[-1, :, :, :]
-            Y = np.transpose(Y, [2, 0, 1, 3])
-
-        Y = np.squeeze(Y)
-        return Y, Y_h
-
 class Einsum(nn.Module):
     def __init__(self, equation):
         super(Einsum, self).__init__()
@@ -1601,118 +1463,95 @@ with torch.no_grad():
 
 save_data_and_model("unflatten", x, model, export_params=True)
 
-def _extract_value_info(x, name, type_proto=None):  # type: (Union[List[Any], np.ndarray, None], Text, Optional[TypeProto]) -> onnx.ValueInfoProto
-    if type_proto is None:
-        if x is None:
-            raise NotImplementedError("_extract_value_info: both input and type_proto arguments cannot be None.")
-        elif isinstance(x, list):
-            elem_type = onnx.mapping.NP_TYPE_TO_TENSOR_TYPE[x[0].dtype]
-            shape = None
-            tensor_type_proto = onnx.helper.make_tensor_type_proto(elem_type, shape)
-            type_proto = onnx.helper.make_sequence_type_proto(tensor_type_proto)
-        else:
-            elem_type = onnx.mapping.NP_TYPE_TO_TENSOR_TYPE[x.dtype]
-            shape = x.shape
-            type_proto = onnx.helper.make_tensor_type_proto(elem_type, shape)
-    return onnx.helper.make_value_info(name, type_proto)
+################# LSTM layout attribute #################
+# ONNXRuntime refuses layout=1 (issue #26456), so the batch-first reference comes from the
+# layout=0 twin (same weights) with only the spec's axis permutation applied:
+#   X   (seq,batch,inp)      <-> (batch,seq,inp)
+#   h/c (dirs,batch,hid)     <-> (batch,dirs,hid)
+#   Y   (seq,dirs,batch,hid) <-> (batch,seq,dirs,hid)
 
-def save_model_and_data_lstm_layout(lstm, layout, x, hx, cx, basename):
-
-    W = onnx.helper.make_tensor(
-        name="W",
-        data_type = TensorProto.FLOAT,
-        dims = lstm.W.shape,
-        vals = lstm.W.flatten()
-    )
-
-    B = onnx.helper.make_tensor(
-        name="B",
-        data_type = TensorProto.FLOAT,
-        dims = lstm.B.shape,
-        vals = lstm.B.flatten()
-    )
-
-    R = onnx.helper.make_tensor(
-        name="R",
-        data_type = TensorProto.FLOAT,
-        dims = lstm.R.shape,
-        vals = lstm.R.flatten()
-    )
+def make_lstm_layout_model(layout, seq_length, batch_size, input_size, hidden_size,
+                           num_directions, W, R, B, model_file):
+    if layout == 0:
+        x_shape = [seq_length, batch_size, input_size]
+        h_shape = [num_directions, batch_size, hidden_size]
+        y_shape = [seq_length, num_directions, batch_size, hidden_size]
+        yh_shape = [num_directions, batch_size, hidden_size]
+    else:
+        x_shape = [batch_size, seq_length, input_size]
+        h_shape = [batch_size, num_directions, hidden_size]
+        y_shape = [batch_size, seq_length, num_directions, hidden_size]
+        yh_shape = [batch_size, num_directions, hidden_size]
 
     lstm_node = onnx.helper.make_node(
-            "LSTM",
-            inputs=["x", "W", "R", "B", "", "hx", "cx"],
-            outputs=["y", "y_h"],
-            name = "LSTM",
-            layout=layout,
-            hidden_size=hidden_size,
-        )
+        "LSTM",
+        inputs=["x", "W", "R", "B", "", "hx", "cx"],
+        outputs=["y", "y_h"],
+        name="LSTM",
+        layout=layout,
+        hidden_size=hidden_size,
+    )
 
-    Y, Y_h = lstm.step()
-
-    inputs = [x, hx, cx]
-    outputs = [Y, Y_h]
-    present_inputs = ['x', 'hx', 'cx']
-    present_outputs = ['y', 'y_h']
-
-    input_type_protos = [None] * len(inputs)
-    output_type_protos = [None] * len(outputs)
-
-    inputs_vi = [_extract_value_info(arr, arr_name, input_type)
-                    for arr, arr_name, input_type in zip(inputs, present_inputs, input_type_protos)]
-    outputs_vi = [_extract_value_info(arr, arr_name, output_type)
-                    for arr, arr_name, output_type in zip(outputs, present_outputs, output_type_protos)]
-
-    # Create the graph
     lstm_graph = onnx.helper.make_graph(
         [lstm_node],
         "layout_lstm",
-        inputs=inputs_vi,
-        outputs=outputs_vi,
-        initializer=[W, R, B]
-        )
-
-    m = onnx.helper.make_model(lstm_graph, producer_name="backend-test")
-    model_file = os.path.join("models", basename + ".onnx")
-    onnx.save(m, model_file)
-    onnx.checker.check_model(m)
-
-    for i, data in enumerate(inputs):
-        input_files = os.path.join("data", "input_" + basename + f"_{str(i)}.npy")
-        data = data.astype(np.float32)
-        np.save(input_files, np.ascontiguousarray(data.data))
-
-    output_file = os.path.join("data", "output_" + basename + ".npy")
-    Y_h = data.astype(np.float32)
-    np.save(output_file, np.ascontiguousarray(Y_h.data))
-
-
-
-## Generate data and model for testing LSTM Layout attribute
-input_size          = 3
-hidden_size         = 7
-batch_size          = 5
-seq_length          = 2
-
-hx = np.ones((1, batch_size, hidden_size)).astype(np.float32)
-cx = np.ones((1, batch_size, hidden_size)).astype(np.float32)
-
-for layout in [0, 1]:
-    if layout:
-        x = np.ones((batch_size, seq_length, input_size)).astype(np.float32)
-    else:
-        x = np.ones((seq_length, batch_size, input_size)).astype(np.float32)
-
-    lstm = LayoutLSTM(
-        X=x,
-        initial_h=hx,
-        initial_c=cx,
-        layout=layout,
-        hidden_size=hidden_size,
-        input_size=input_size
+        inputs=[onnx.helper.make_tensor_value_info(name, TensorProto.FLOAT, shape)
+                for name, shape in (("x", x_shape), ("hx", h_shape), ("cx", h_shape))],
+        outputs=[onnx.helper.make_tensor_value_info(name, TensorProto.FLOAT, shape)
+                 for name, shape in (("y", y_shape), ("y_h", yh_shape))],
+        initializer=[onnx.helper.make_tensor(name, TensorProto.FLOAT, arr.shape, arr.flatten())
+                     for name, arr in (("W", W), ("R", R), ("B", B))],
     )
 
-    save_model_and_data_lstm_layout(lstm, layout, x, hx, cx, f"lstm_layout_{str(layout)}")
+    m = onnx.helper.make_model(lstm_graph,
+                               producer_name="github.com/opencv/opencv_extra",
+                               opset_imports=[onnx.helper.make_opsetid("", 16)])
+    # keep the IR of the models this replaces: recent onnx defaults to an IR newer
+    # than onnxruntime accepts, and the reference below needs ORT to load the model
+    m.ir_version = 8
+    onnx.checker.check_model(m)
+    onnx.save(m, model_file)
+
+
+def gen_lstm_layout():
+    import onnxruntime as ort
+
+    input_size, hidden_size, batch_size, seq_length, num_directions = 3, 7, 5, 2, 1
+    np.random.seed(0)
+
+    # Non-trivial weights and inputs. With the all-ones data this test used to
+    # carry every timestep is identical, so a wrong seq/batch ordering under
+    # layout=1 produces the very same numbers and cannot be detected.
+    W = np.random.randn(num_directions, 4 * hidden_size, input_size).astype(np.float32)
+    R = np.random.randn(num_directions, 4 * hidden_size, hidden_size).astype(np.float32)
+    B = np.random.randn(num_directions, 8 * hidden_size).astype(np.float32)
+
+    x = np.random.randn(seq_length, batch_size, input_size).astype(np.float32)
+    hx = np.random.randn(num_directions, batch_size, hidden_size).astype(np.float32)
+    cx = np.random.randn(num_directions, batch_size, hidden_size).astype(np.float32)
+
+    for layout in [0, 1]:
+        basename = "lstm_layout_{}".format(layout)
+        make_lstm_layout_model(layout, seq_length, batch_size, input_size, hidden_size,
+                               num_directions, W, R, B,
+                               os.path.join("models", basename + ".onnx"))
+
+        # the reference always comes from the layout=0 twin
+        session = ort.InferenceSession(os.path.join("models", "lstm_layout_0.onnx"))
+        y, _y_h = session.run(None, {"x": x, "hx": hx, "cx": cx})
+
+        if layout == 0:
+            inputs = [x, hx, cx]
+        else:
+            inputs = [np.ascontiguousarray(a.transpose(1, 0, 2)) for a in (x, hx, cx)]
+            y = np.ascontiguousarray(y.transpose(2, 0, 1, 3))
+
+        for i, data in enumerate(inputs):
+            np.save(os.path.join("data", "input_{}_{}.npy".format(basename, i)), data)
+        # Net::forward("") returns the first graph output, i.e. Y
+        np.save(os.path.join("data", "output_{}.npy".format(basename)), y)
+
+gen_lstm_layout()
 
 
 class MatMul(nn.Module):
@@ -3193,6 +3032,57 @@ tile=dict(
 
 generate_onnx_single_operator(tile, "tile")
 
+# Tile-1 (opset 1) form: 3 inputs (input, tiles, axis). A negative axis is
+# valid here and is normalized against the input rank; before the bound was
+# added the parser indexed the repeats buffer with the raw axis.
+def generate_tile_neg_axis(name="tile_neg_axis"):
+    inp = np.random.randn(2, 3, 4, 5).astype(np.float32)
+    tiles = np.array([3], dtype=np.int64)
+    axis = np.array([-1], dtype=np.int64)
+
+    reps = [1] * inp.ndim
+    reps[int(axis[0])] = int(tiles[0])
+    out = np.tile(inp, reps)
+
+    X = onnx.helper.make_tensor_value_info("input", TensorProto.FLOAT, list(inp.shape))
+    Y = onnx.helper.make_tensor_value_info("output", TensorProto.FLOAT, list(out.shape))
+    tiles_init = onnx.helper.make_tensor("tiles", TensorProto.INT64, [1], tiles)
+    axis_init = onnx.helper.make_tensor("axis", TensorProto.INT64, [1], axis)
+    node = onnx.helper.make_node("Tile", inputs=["input", "tiles", "axis"], outputs=["output"])
+    graph = onnx.helper.make_graph([node], name, [X], [Y], [tiles_init, axis_init])
+    model = onnx.helper.make_model(graph, producer_name="github.com/opencv/opencv_extra",
+                                   opset_imports=[onnx.helper.make_opsetid("", 1)])
+    onnx.checker.check_model(model)
+    onnx.save(model, "models/{}.onnx".format(name))
+    np.save("data/input_{}.npy".format(name), inp)
+    np.save("data/output_{}.npy".format(name), np.ascontiguousarray(out))
+
+generate_tile_neg_axis()
+
+def generate_empty_constant_int64(name="empty_constant_int64"):
+    data = np.array([10, 20, 30], dtype=np.int64)   # runtime input keeps the Concat un-foldable
+
+    empty_tensor = onnx.helper.make_tensor("empty_val", TensorProto.INT64, [0], vals=[])
+    const_node = onnx.helper.make_node("Constant", [], ["empty_const"], value=empty_tensor)
+    concat_node = onnx.helper.make_node("Concat", ["data", "empty_const"], ["output"], axis=0)
+
+    X = onnx.helper.make_tensor_value_info("data", TensorProto.INT64, [3])
+    Y = onnx.helper.make_tensor_value_info("output", TensorProto.INT64, [3])
+    graph = onnx.helper.make_graph([const_node, concat_node], name, [X], [Y])
+    model = onnx.helper.make_model(graph, producer_name=name,
+                                   opset_imports=[onnx.helper.make_opsetid("", 13)])
+    model.ir_version = 9
+    onnx.checker.check_model(model)
+    onnx.save(model, "models/{}.onnx".format(name))
+
+    import onnxruntime as ort
+    sess = ort.InferenceSession("models/{}.onnx".format(name))
+    out = sess.run(["output"], {"data": data})[0]
+    np.save("data/input_{}.npy".format(name), data)
+    np.save("data/output_{}.npy".format(name), out)
+
+generate_empty_constant_int64()
+
 def gen_layer_norm_expanded(input_shape=[1, 4, 5], axis=-1, constant_as_initializers=False):
     X = onnx.helper.make_tensor_value_info("X", onnx.TensorProto.FLOAT, input_shape)
     Y = onnx.helper.make_tensor_value_info("Y", onnx.TensorProto.FLOAT, input_shape)
@@ -3289,6 +3179,118 @@ def gen_layer_norm_expanded(input_shape=[1, 4, 5], axis=-1, constant_as_initiali
 
 gen_layer_norm_expanded()
 gen_layer_norm_expanded(constant_as_initializers=True)
+
+def generate_simplified_layer_normalization(name="simplified_layer_normalization"):
+    np.random.seed(0x12345)
+    B, S, H = 1, 4, 8
+    eps = 1e-5
+    x = np.random.randn(B, S, H).astype(np.float32)
+    scale = np.random.randn(H).astype(np.float32)
+
+    def init(nm, arr):
+        return onnx.helper.make_tensor(nm, TensorProto.FLOAT, list(arr.shape), arr.tobytes(), raw=True)
+    X = onnx.helper.make_tensor_value_info("x", TensorProto.FLOAT, [B, S, H])
+    Y = onnx.helper.make_tensor_value_info("y", TensorProto.FLOAT, [B, S, H])
+
+    node = onnx.helper.make_node("SimplifiedLayerNormalization", ["x", "scale"], ["y"],
+                                 domain="com.microsoft", axis=-1, epsilon=eps)
+    graph = onnx.helper.make_graph([node], name, [X], [Y], [init("scale", scale)])
+    model = onnx.helper.make_model(graph, producer_name=name,
+        opset_imports=[onnx.helper.make_opsetid("", 13), onnx.helper.make_opsetid("com.microsoft", 1)])
+    model.ir_version = 9
+    onnx.checker.check_model(model)
+    onnx.save(model, "models/{}.onnx".format(name))
+
+    eps_t = onnx.helper.make_tensor("eps", TensorProto.FLOAT, [], [eps])
+    ref_nodes = [
+        onnx.helper.make_node("Mul", ["x", "x"], ["sq"]),
+        onnx.helper.make_node("ReduceMean", ["sq"], ["ms"], axes=[-1], keepdims=1),
+        onnx.helper.make_node("Add", ["ms", "eps"], ["mse"]),
+        onnx.helper.make_node("Sqrt", ["mse"], ["rms"]),
+        onnx.helper.make_node("Div", ["x", "rms"], ["xn"]),
+        onnx.helper.make_node("Mul", ["xn", "scale"], ["y"]),
+    ]
+    ref_graph = onnx.helper.make_graph(ref_nodes, name + "_ref", [X], [Y],
+                                       [init("scale", scale), eps_t])
+    ref_model = onnx.helper.make_model(ref_graph,
+        opset_imports=[onnx.helper.make_opsetid("", 13)])
+    ref_model.ir_version = 9
+    onnx.checker.check_model(ref_model)
+
+    import onnxruntime as ort
+    sess = ort.InferenceSession(ref_model.SerializeToString())
+    y = sess.run(["y"], {"x": x})[0]
+    np.save("data/input_{}.npy".format(name), x)
+    np.save("data/output_{}.npy".format(name), y)
+
+generate_simplified_layer_normalization()
+
+def generate_matmulnbits(name, bits, K=32, block_size=16):
+    np.random.seed(0x12345)
+    M, N = 3, 4
+    n_blk = (K + block_size - 1) // block_size   # ceil: K need not divide block_size (last block may be partial)
+    elems_per_byte = 8 // bits
+
+    A = (np.random.randn(M, K) * 0.3).astype(np.float32)
+    q = np.random.randint(0, 1 << bits, size=(N, n_blk, block_size)).astype(np.int32)
+    scales = (np.random.randn(N, n_blk) * 0.1).astype(np.float32)
+
+    blob = np.zeros((N, n_blk, block_size * bits // 8), np.uint8)
+    for n in range(N):
+        for b in range(n_blk):
+            for i in range(block_size):
+                byte, e = i // elems_per_byte, i % elems_per_byte
+                blob[n, b, byte] |= (int(q[n, b, i]) & ((1 << bits) - 1)) << (e * bits)
+
+    B = onnx.helper.make_tensor("B", TensorProto.UINT8, list(blob.shape), blob.tobytes(), raw=True)
+    sc = onnx.helper.make_tensor("scales", TensorProto.FLOAT, list(scales.shape), scales.reshape(-1))
+    node = onnx.helper.make_node("MatMulNBits", ["A", "B", "scales"], ["Y"],
+                                 domain="com.microsoft", K=K, N=N, bits=bits, block_size=block_size)
+    X = onnx.helper.make_tensor_value_info("A", TensorProto.FLOAT, [M, K])
+    Yv = onnx.helper.make_tensor_value_info("Y", TensorProto.FLOAT, [M, N])
+    graph = onnx.helper.make_graph([node], name, [X], [Yv], [B, sc])
+    model = onnx.helper.make_model(graph, producer_name=name,
+        opset_imports=[onnx.helper.make_opsetid("", 13), onnx.helper.make_opsetid("com.microsoft", 1)])
+    model.ir_version = 9
+    onnx.checker.check_model(model)
+    onnx.save(model, "models/{}.onnx".format(name))
+
+    import onnxruntime as ort
+    sess = ort.InferenceSession("models/{}.onnx".format(name))
+    Y = sess.run(["Y"], {"A": A})[0]
+    np.save("data/input_{}.npy".format(name), A)
+    np.save("data/output_{}.npy".format(name), Y)
+
+generate_matmulnbits("matmulnbits", 4)
+generate_matmulnbits("matmulnbits_8bits", 8)
+generate_matmulnbits("matmulnbits_partial_block", 4, K=34, block_size=16)
+
+def generate_resize_1d_linear(name="resize_1d_linear"):
+    # Rank-3 (N,C,W) Resize with linear/half_pixel: a 1-D resize of the last axis.
+    np.random.seed(0x12345)
+    C, W, W_out = 4, 7, 13
+    x = np.random.randn(1, C, W).astype(np.float32)
+
+    sizes = onnx.helper.make_tensor("sizes", TensorProto.INT64, [3], vals=[1, C, W_out])
+    resize = onnx.helper.make_node("Resize", ["x", "", "", "sizes"], ["y"],
+                                   mode="linear", coordinate_transformation_mode="half_pixel")
+
+    X = onnx.helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, C, W])
+    Y = onnx.helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, C, W_out])
+    graph = onnx.helper.make_graph([resize], name, [X], [Y], [sizes])
+    model = onnx.helper.make_model(graph, producer_name=name,
+                                   opset_imports=[onnx.helper.make_opsetid("", 13)])
+    model.ir_version = 9
+    onnx.checker.check_model(model)
+    onnx.save(model, "models/{}.onnx".format(name))
+
+    import onnxruntime as ort
+    sess = ort.InferenceSession("models/{}.onnx".format(name))
+    out = sess.run(["y"], {"x": x})[0]
+    np.save("data/input_{}.npy".format(name), x)
+    np.save("data/output_{}.npy".format(name), out)
+
+generate_resize_1d_linear()
 
 ################# GELU #################
 
@@ -3540,3 +3542,61 @@ node_concat2 = helper.make_node("Concat", inputs=["input_layer_blue_green", "old
 node_add = helper.make_node("Add", inputs=["concat1_out", "concat2_out"], outputs=["output"])
 graph = helper.make_graph([node_concat1, node_concat2, node_add], "net_input_graph", [bg1, r1, bg2, r2], [out])
 onnx.save(helper.make_model(graph, producer_name="opencv_test_generator"), os.path.join("models", "net_input.onnx"))
+
+def generate_attention_shared_shape_reshape(name="attention_shared_shape_reshape"):
+    np.random.seed(0x12345)
+    S, C, H = 4, 8, 2
+    D = C // H
+
+    def w(nm):
+        return numpy_helper.from_array((np.random.randn(C, C) / np.sqrt(C)).astype(np.float32), nm)
+
+    def i64(nm, arr):
+        return numpy_helper.from_array(np.array(arr, dtype=np.int64), nm)
+
+    initializers = [
+        w("Wq"), w("Wk"), w("Wv"),
+        numpy_helper.from_array(np.float32(np.sqrt(D)), "div_scalar"),
+        i64("q_shape", [-1, S, H, D]), i64("kv_shape", [-1, S, H, D]), i64("out_shape", [-1, S, C]),
+        i64("gather_idx", 0), i64("dim0", [0]), i64("dim_S", [S]), i64("dim_C", [C]),
+    ]
+    nodes = [
+        helper.make_node("MatMul", ["X", "Wq"], ["Q"]),
+        helper.make_node("MatMul", ["X", "Wk"], ["K"]),
+        helper.make_node("MatMul", ["X", "Wv"], ["V"]),
+        helper.make_node("Reshape", ["Q", "q_shape"], ["Qr"]),
+        helper.make_node("Transpose", ["Qr"], ["Qt"], perm=[0, 2, 1, 3]),
+        helper.make_node("Reshape", ["K", "kv_shape"], ["Kr"]),
+        helper.make_node("Transpose", ["Kr"], ["Kt"], perm=[0, 2, 3, 1]),
+        helper.make_node("Reshape", ["V", "kv_shape"], ["Vr"]),
+        helper.make_node("Transpose", ["Vr"], ["Vt"], perm=[0, 2, 1, 3]),
+        helper.make_node("MatMul", ["Qt", "Kt"], ["qk"]),
+        helper.make_node("Div", ["qk", "div_scalar"], ["qk_s"]),
+        helper.make_node("Softmax", ["qk_s"], ["attn"], axis=-1),
+        helper.make_node("MatMul", ["attn", "Vt"], ["av"]),
+        helper.make_node("Transpose", ["av"], ["avt"], perm=[0, 2, 1, 3]),
+        helper.make_node("Reshape", ["avt", "out_shape"], ["attn_out"]),
+        helper.make_node("Shape", ["Q"], ["shapeQ"]),
+        helper.make_node("Gather", ["shapeQ", "gather_idx"], ["gB"], axis=0),
+        helper.make_node("Unsqueeze", ["gB", "dim0"], ["gB1"]),
+        helper.make_node("Concat", ["gB1", "dim_S", "dim_C"], ["res_shape"], axis=0),
+        helper.make_node("Reshape", ["X", "res_shape"], ["Zr"]),
+        helper.make_node("Add", ["attn_out", "Zr"], ["Y"]),
+    ]
+    X = helper.make_tensor_value_info("X", TensorProto.FLOAT, ["B", S, C])
+    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["B", S, C])
+    graph = helper.make_graph(nodes, name, [X], [Y], initializers)
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 8
+    onnx.checker.check_model(model)
+    model = onnx.shape_inference.infer_shapes(model)
+    onnx.save(model, "models/{}.onnx".format(name))
+
+    x = (np.random.randn(1, S, C) * 0.5).astype(np.float32)
+    import onnxruntime as ort
+    sess = ort.InferenceSession("models/{}.onnx".format(name))
+    out = sess.run(["Y"], {"X": x})[0]
+    np.save("data/input_{}.npy".format(name), x)
+    np.save("data/output_{}.npy".format(name), out)
+
+generate_attention_shared_shape_reshape()
